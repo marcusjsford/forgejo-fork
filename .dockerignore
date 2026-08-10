@@ -87,7 +87,11 @@ cpu.out
 /web_src/fomantic/build/themes/default/assets/fonts/*
 !/web_src/fomantic/build/themes/default/assets/fonts/icons.woff2
 !/web_src/fomantic/build/themes/default/assets/fonts/outline-icons.woff2
-/VERSION
+# Not excluding VERSION here (unlike upstream's default): our local build
+# context is a shallow tag-only clone, so `git describe --tags` inside the
+# Docker build can't resolve a version the way upstream's full-history CI
+# context can. We supply VERSION directly instead, per Makefile's own
+# documented fallback for exactly this case (see verify-version's error text).
 /.air
 /.go-licenses
 

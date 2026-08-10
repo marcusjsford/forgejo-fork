@@ -16,6 +16,7 @@ import (
 	"forgejo.org/modules/graceful"
 	"forgejo.org/modules/indexer/code/bleve"
 	"forgejo.org/modules/indexer/code/elasticsearch"
+	"forgejo.org/modules/indexer/code/hybrid"
 	"forgejo.org/modules/indexer/code/internal"
 	"forgejo.org/modules/indexer/code/zoekt"
 	"forgejo.org/modules/log"
@@ -130,7 +131,7 @@ func Init() {
 
 	// Create the Queue
 	switch setting.Indexer.RepoType {
-	case "bleve", "elasticsearch", "zoekt":
+	case "bleve", "elasticsearch", "zoekt", "hybrid":
 		handler := func(items ...*internal.IndexerData) (unhandled []*internal.IndexerData) {
 			indexer := *globalIndexer.Load()
 			// make it a process to allow for cancellation (especially during integration tests where no global shutdown happens)
@@ -219,6 +220,26 @@ func Init() {
 				close(waitChannel)
 
 				log.Fatal("PID: %d Unable to initialize the zoekt Repository Indexer at path: %s Error: %v", os.Getpid(), setting.Indexer.RepoPath, err)
+			}
+
+		case "hybrid":
+			log.Info("PID: %d Initializing Hybrid Repository Indexer (zoekt at %s + sidecar %s)", os.Getpid(), setting.Indexer.RepoPath, setting.Indexer.HybridSidecarURL)
+			defer func() {
+				if err := recover(); err != nil {
+					log.Error("PANIC whilst initializing repository indexer: %v\nStacktrace: %s", err, log.Stack(2))
+					log.Error("The indexer files are likely corrupted and may need to be deleted")
+					log.Error("You can completely remove the \"%s\" directory to make Forgejo recreate the indexes", setting.Indexer.RepoPath)
+				}
+			}()
+
+			rIndexer = hybrid.NewIndexer()
+			existed, err = rIndexer.Init(ctx)
+			if err != nil {
+				cancel()
+				(*globalIndexer.Load()).Close()
+				close(waitChannel)
+
+				log.Fatal("PID: %d Unable to initialize the hybrid Repository Indexer: %v", os.Getpid(), err)
 			}
 
 		default:

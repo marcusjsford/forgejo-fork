@@ -34,6 +34,15 @@ var Indexer = struct {
 	IncludePatterns        []Glob
 	ExcludePatterns        []Glob
 	ExcludeVendored        bool
+
+	// Hybrid indexer settings (REPO_INDEXER_TYPE = hybrid). Zoekt itself needs
+	// no separate config here — the hybrid indexer reuses RepoPath/RepoIndexerName
+	// above and Forgejo's native in-process Zoekt indexer, same as REPO_INDEXER_TYPE
+	// = zoekt does. Only the sidecar (semantic search) and RRF fusion are hybrid-specific.
+	HybridSidecarURL    string // URL of the Rust embedding sidecar
+	HybridSidecarToken  string // X-Indexer-Token secret
+	HybridRRFK          int    // RRF rank fusion constant k (default 60)
+	HybridSemanticLimit int    // Max sidecar (semantic) results before RRF (default 20)
 }{
 	IssueType:        "bleve",
 	IssuePath:        "indexers/issues.bleve",
@@ -50,6 +59,11 @@ var Indexer = struct {
 	RepoIndexerName:        "gitea_codes",
 	MaxIndexerFileSize:     1024 * 1024,
 	ExcludeVendored:        true,
+
+	HybridSidecarURL:    "http://sidecar:8080",
+	HybridSidecarToken:  "",
+	HybridRRFK:          60,
+	HybridSemanticLimit: 20,
 }
 
 type Glob struct {
@@ -103,6 +117,15 @@ func loadIndexerFrom(rootCfg ConfigProvider) {
 	Indexer.ExcludeVendored = sec.Key("REPO_INDEXER_EXCLUDE_VENDORED").MustBool(true)
 	Indexer.MaxIndexerFileSize = sec.Key("MAX_FILE_SIZE").MustInt64(1024 * 1024)
 	Indexer.StartupTimeout = sec.Key("STARTUP_TIMEOUT").MustDuration(30 * time.Second)
+
+	if Indexer.RepoType == "hybrid" {
+		// Section name uses underscore to match GITEA__indexer_hybrid__* env var format.
+		hsec := rootCfg.Section("indexer_hybrid")
+		Indexer.HybridSidecarURL = hsec.Key("SIDECAR_URL").MustString(Indexer.HybridSidecarURL)
+		Indexer.HybridSidecarToken = hsec.Key("SIDECAR_TOKEN").MustString("")
+		Indexer.HybridRRFK = hsec.Key("RRF_K").MustInt(Indexer.HybridRRFK)
+		Indexer.HybridSemanticLimit = hsec.Key("SEMANTIC_LIMIT").MustInt(Indexer.HybridSemanticLimit)
+	}
 }
 
 // IndexerGlobFromString parses a comma separated list of patterns and returns a glob.Glob slice suited for repo indexing
