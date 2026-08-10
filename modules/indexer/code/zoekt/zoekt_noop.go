@@ -28,7 +28,7 @@ func NewIndexer(_ string) *Indexer {
 }
 
 // Index will save the index data
-func (b *Indexer) Index(ctx context.Context, repo *repo_model.Repository, sha string, changes *internal.RepoChanges) error {
+func (b *Indexer) Index(ctx context.Context, repo *repo_model.Repository, branch, sha string, changes *internal.RepoChanges) error {
 	return inner_zoekt.ErrNotImplemented
 }
 

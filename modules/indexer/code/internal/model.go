@@ -25,6 +25,10 @@ type RepoChanges struct {
 // IndexerData represents data stored in the code indexer
 type IndexerData struct {
 	RepoID int64
+	// Branch is the pushed branch to index. "" means "the default branch" — the
+	// sentinel used by callers that aren't reacting to a specific branch push
+	// (repo migration, delete, default-branch change, manual reindex).
+	Branch string
 }
 
 // Matches found in code with zoekt indexer

@@ -176,8 +176,9 @@ func (b *Indexer) addDelete(filename string, repo *repo_model.Repository) elasti
 		Id(id)
 }
 
-// Index will save the index data
-func (b *Indexer) Index(ctx context.Context, repo *repo_model.Repository, sha string, changes *internal.RepoChanges) error {
+// Index will save the index data. branch is unused: elasticsearch stores a single
+// shard per repo and only ever receives default-branch calls.
+func (b *Indexer) Index(ctx context.Context, repo *repo_model.Repository, branch, sha string, changes *internal.RepoChanges) error {
 	reqs := make([]elastic.BulkableRequest, 0)
 	if len(changes.Updates) > 0 {
 		r, err := gitrepo.OpenRepository(ctx, repo)

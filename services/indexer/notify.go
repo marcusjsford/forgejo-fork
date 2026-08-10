@@ -6,6 +6,7 @@ package indexer
 import (
 	"context"
 
+	git_model "forgejo.org/models/git"
 	issues_model "forgejo.org/models/issues"
 	repo_model "forgejo.org/models/repo"
 	user_model "forgejo.org/models/user"
@@ -17,6 +18,31 @@ import (
 	"forgejo.org/modules/setting"
 	notify_service "forgejo.org/services/notify"
 )
+
+// shouldIndexBranch reports whether a push to branch should enqueue code indexing.
+// Always true for the default branch. Non-default branches are gated to the hybrid
+// indexer only: bleve/elasticsearch/zoekt store a single shard per repo with no
+// branch namespacing, so feeding them a non-default branch would silently overwrite
+// that shard with whichever branch pushed most recently. Within hybrid, a non-default
+// branch is indexed only if it matches an existing branch-protection rule (including
+// glob rule names like release/**) — protection is treated as the repo owner's signal
+// that the branch matters enough to keep indexed, not "index every branch that
+// exists." See planning/stories/020-branch-aware-indexing/findings.md for why this
+// reuses branch protection instead of introducing a separate allowlist config.
+func shouldIndexBranch(ctx context.Context, repo *repo_model.Repository, branch string) bool {
+	if branch == repo.DefaultBranch {
+		return true
+	}
+	if setting.Indexer.RepoType != "hybrid" {
+		return false
+	}
+	protected, err := git_model.IsBranchProtected(ctx, repo.ID, branch)
+	if err != nil {
+		log.Error("shouldIndexBranch: IsBranchProtected(%d, %s): %v", repo.ID, branch, err)
+		return false
+	}
+	return protected
+}
 
 type indexerNotifier struct {
 	notify_service.NullNotifier
@@ -70,7 +96,7 @@ func (r *indexerNotifier) DeleteComment(ctx context.Context, doer *user_model.Us
 func (r *indexerNotifier) DeleteRepository(ctx context.Context, doer *user_model.User, repo *repo_model.Repository) {
 	issue_indexer.DeleteRepoIssueIndexer(ctx, repo.ID)
 	if setting.Indexer.RepoIndexerEnabled {
-		code_indexer.UpdateRepoIndexer(repo)
+		code_indexer.UpdateRepoIndexer(repo, "")
 	}
 }
 
@@ -81,7 +107,7 @@ func (r indexerNotifier) DeleteIssue(ctx context.Context, doer *user_model.User,
 func (r *indexerNotifier) MigrateRepository(ctx context.Context, doer, u *user_model.User, repo *repo_model.Repository) {
 	issue_indexer.UpdateRepoIndexer(ctx, repo.ID)
 	if setting.Indexer.RepoIndexerEnabled && !repo.IsEmpty {
-		code_indexer.UpdateRepoIndexer(repo)
+		code_indexer.UpdateRepoIndexer(repo, "")
 	}
 	if err := stats_indexer.UpdateRepoIndexer(repo); err != nil {
 		log.Error("stats_indexer.UpdateRepoIndexer(%d) failed: %v", repo.ID, err)
@@ -93,8 +119,9 @@ func (r *indexerNotifier) PushCommits(ctx context.Context, pusher *user_model.Us
 		return
 	}
 
-	if setting.Indexer.RepoIndexerEnabled && opts.RefFullName.BranchName() == repo.DefaultBranch {
-		code_indexer.UpdateRepoIndexer(repo)
+	branch := opts.RefFullName.BranchName()
+	if setting.Indexer.RepoIndexerEnabled && shouldIndexBranch(ctx, repo, branch) {
+		code_indexer.UpdateRepoIndexer(repo, branch)
 	}
 	if err := stats_indexer.UpdateRepoIndexer(repo); err != nil {
 		log.Error("stats_indexer.UpdateRepoIndexer(%d) failed: %v", repo.ID, err)
@@ -106,8 +133,9 @@ func (r *indexerNotifier) SyncPushCommits(ctx context.Context, pusher *user_mode
 		return
 	}
 
-	if setting.Indexer.RepoIndexerEnabled && opts.RefFullName.BranchName() == repo.DefaultBranch {
-		code_indexer.UpdateRepoIndexer(repo)
+	branch := opts.RefFullName.BranchName()
+	if setting.Indexer.RepoIndexerEnabled && shouldIndexBranch(ctx, repo, branch) {
+		code_indexer.UpdateRepoIndexer(repo, branch)
 	}
 	if err := stats_indexer.UpdateRepoIndexer(repo); err != nil {
 		log.Error("stats_indexer.UpdateRepoIndexer(%d) failed: %v", repo.ID, err)
@@ -116,7 +144,7 @@ func (r *indexerNotifier) SyncPushCommits(ctx context.Context, pusher *user_mode
 
 func (r *indexerNotifier) ChangeDefaultBranch(ctx context.Context, repo *repo_model.Repository) {
 	if setting.Indexer.RepoIndexerEnabled && !repo.IsEmpty {
-		code_indexer.UpdateRepoIndexer(repo)
+		code_indexer.UpdateRepoIndexer(repo, "")
 	}
 	if err := stats_indexer.UpdateRepoIndexer(repo); err != nil {
 		log.Error("stats_indexer.UpdateRepoIndexer(%d) failed: %v", repo.ID, err)

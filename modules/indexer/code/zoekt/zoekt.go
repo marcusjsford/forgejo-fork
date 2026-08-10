@@ -161,8 +161,11 @@ func detectLanguage(filename string, content []byte) string {
 	return normalizeLanguage(lang)
 }
 
-// Index will save the index data
-func (b *Indexer) Index(ctx context.Context, repo *repo_model.Repository, sha string, changes *internal.RepoChanges) error {
+// Index will save the index data. branch is unused here: this indexer builds one
+// zoekt shard per repo keyed by sha and only ever receives default-branch calls
+// (zoekt's on-disk format can represent multiple branches per shard, but wiring
+// that up is out of scope for this story — see planning/stories/020).
+func (b *Indexer) Index(ctx context.Context, repo *repo_model.Repository, branch, sha string, changes *internal.RepoChanges) error {
 	builder, err := newZoektIndexBuilder(b.indexDir, repo, sha)
 	if errors.Is(err, errSkipIndexing) {
 		return nil

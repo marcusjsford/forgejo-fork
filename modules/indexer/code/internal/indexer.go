@@ -15,7 +15,10 @@ import (
 // Indexer defines an interface to index and search code contents
 type Indexer interface {
 	internal.Indexer
-	Index(ctx context.Context, repo *repo_model.Repository, sha string, changes *RepoChanges) error
+	// Index indexes changes on the given branch at commit sha. Non-hybrid backends
+	// (bleve/elasticsearch/zoekt) store a single shard per repo with no branch
+	// namespacing and only ever receive default-branch calls; they may ignore branch.
+	Index(ctx context.Context, repo *repo_model.Repository, branch, sha string, changes *RepoChanges) error
 	Delete(ctx context.Context, repoID int64) error
 	Search(ctx context.Context, opts *SearchOptions) (int64, []*SearchResult, []*SearchResultLanguages, error)
 	Formatter() ResultFormatter
@@ -62,7 +65,7 @@ type dummyIndexer struct {
 	internal.Indexer
 }
 
-func (d *dummyIndexer) Index(ctx context.Context, repo *repo_model.Repository, sha string, changes *RepoChanges) error {
+func (d *dummyIndexer) Index(ctx context.Context, repo *repo_model.Repository, branch, sha string, changes *RepoChanges) error {
 	return errors.New("indexer is not ready")
 }
 

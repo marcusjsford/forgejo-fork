@@ -41,13 +41,20 @@ func init() {
 	globalIndexer.Store(dummyIndexer)
 }
 
-func index(ctx context.Context, indexer internal.Indexer, repoID int64) error {
+func index(ctx context.Context, indexer internal.Indexer, repoID int64, branch string) error {
 	repo, err := repo_model.GetRepositoryByID(ctx, repoID)
 	if repo_model.IsErrRepoNotExist(err) {
 		return indexer.Delete(ctx, repoID)
 	}
 	if err != nil {
 		return err
+	}
+
+	// "" is the sentinel used by callers that don't know or care which branch (repo
+	// migration, delete, default-branch-change, manual reindex from repo settings) — they
+	// always mean "index as normal," which is the default branch.
+	if branch == "" {
+		branch = repo.DefaultBranch
 	}
 
 	repoTypes := setting.Indexer.RepoIndexerRepoTypes
@@ -76,22 +83,22 @@ func index(ctx context.Context, indexer internal.Indexer, repoID int64) error {
 		return nil
 	}
 
-	sha, err := getDefaultBranchSha(ctx, repo)
+	sha, err := getBranchSha(ctx, repo, branch)
 	if err != nil {
 		return err
 	}
-	changes, err := getRepoChanges(ctx, repo, sha)
+	changes, err := getRepoChanges(ctx, repo, branch, sha)
 	if err != nil {
 		return err
 	} else if changes == nil {
 		return nil
 	}
 
-	if err := indexer.Index(ctx, repo, sha, changes); err != nil {
+	if err := indexer.Index(ctx, repo, branch, sha, changes); err != nil {
 		return err
 	}
 
-	return repo_model.UpdateIndexerStatus(ctx, repo, repo_model.RepoIndexerTypeCode, sha)
+	return repo_model.UpdateIndexerStatus(ctx, repo, repo_model.RepoIndexerTypeCode, branch, sha)
 }
 
 func setSearchOption(set bool, val string) {
@@ -138,8 +145,8 @@ func Init() {
 			batchCtx, _, finished := process.GetManager().AddContext(ctx, "CodeIndexer batch")
 			defer finished()
 			for _, indexerData := range items {
-				log.Trace("IndexerData Process Repo: %d", indexerData.RepoID)
-				if err := index(batchCtx, indexer, indexerData.RepoID); err != nil {
+				log.Trace("IndexerData Process Repo: %d Branch: %q", indexerData.RepoID, indexerData.Branch)
+				if err := index(batchCtx, indexer, indexerData.RepoID, indexerData.Branch); err != nil {
 					unhandled = append(unhandled, indexerData)
 					if !setting.IsInTesting {
 						log.Error("Codes indexer handler: index error for repo %v: %v", indexerData.RepoID, err)
@@ -293,9 +300,10 @@ func Init() {
 	}
 }
 
-// UpdateRepoIndexer update a repository's entries in the indexer
-func UpdateRepoIndexer(repo *repo_model.Repository) {
-	indexData := &internal.IndexerData{RepoID: repo.ID}
+// UpdateRepoIndexer update a repository's entries in the indexer for the given branch.
+// branch == "" means "the default branch" (see IndexerData.Branch).
+func UpdateRepoIndexer(repo *repo_model.Repository, branch string) {
+	indexData := &internal.IndexerData{RepoID: repo.ID, Branch: branch}
 	if err := indexerQueue.Push(indexData); err != nil {
 		log.Error("Update repo index data %v failed: %v", indexData, err)
 	}

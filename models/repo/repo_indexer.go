@@ -22,11 +22,14 @@ const (
 	RepoIndexerTypeStats // 1
 )
 
-// RepoIndexerStatus status of a repo's entry in the repo indexer
-// For now, implicitly refers to default branch
+// RepoIndexerStatus status of a repo's entry in the repo indexer, one row per
+// (RepoID, IndexerType, Branch). Branch == "" means the default branch — this is
+// also what every row predating the Branch column implicitly means, so the zero
+// value preserves old rows' meaning without a backfill.
 type RepoIndexerStatus struct { //revive:disable-line:exported
 	ID          int64           `xorm:"pk autoincr"`
 	RepoID      int64           `xorm:"INDEX(s)"`
+	Branch      string          `xorm:"VARCHAR(255) NOT NULL DEFAULT ''"`
 	CommitSha   string          `xorm:"VARCHAR(64)"`
 	IndexerType RepoIndexerType `xorm:"INDEX(s) NOT NULL DEFAULT 0"`
 }
@@ -62,24 +65,30 @@ func GetUnindexedRepos(ctx context.Context, indexerType RepoIndexerType, maxRepo
 	return ids, err
 }
 
-// GetIndexerStatus loads repo codes indxer status
-func GetIndexerStatus(ctx context.Context, repo *Repository, indexerType RepoIndexerType) (*RepoIndexerStatus, error) {
+// GetIndexerStatus loads a repo's indexer status for the given branch ("" = default branch).
+// The in-memory cache on repo only ever holds one branch's status at a time — safe because each
+// indexing job loads its own fresh Repository and only ever queries one branch within that job.
+func GetIndexerStatus(ctx context.Context, repo *Repository, indexerType RepoIndexerType, branch string) (*RepoIndexerStatus, error) {
 	switch indexerType {
 	case RepoIndexerTypeCode:
-		if repo.CodeIndexerStatus != nil {
+		if repo.CodeIndexerStatus != nil && repo.CodeIndexerStatus.Branch == branch {
 			return repo.CodeIndexerStatus, nil
 		}
 	case RepoIndexerTypeStats:
-		if repo.StatsIndexerStatus != nil {
+		if repo.StatsIndexerStatus != nil && repo.StatsIndexerStatus.Branch == branch {
 			return repo.StatsIndexerStatus, nil
 		}
 	}
-	status := &RepoIndexerStatus{RepoID: repo.ID}
-	if has, err := db.GetEngine(ctx).Where("`indexer_type` = ?", indexerType).Get(status); err != nil {
+	status := &RepoIndexerStatus{}
+	// Explicit conditions, not xorm's implicit non-zero-field matching: branch == "" (the
+	// default-branch sentinel) is a legitimate value to filter on but is also Go's zero value
+	// for string, which xorm's struct-based Get() silently skips — that would match any branch's
+	// row for this repo instead of specifically the default-branch one.
+	has, err := db.GetEngine(ctx).Where("`repo_id` = ? AND `indexer_type` = ? AND `branch` = ?", repo.ID, indexerType, branch).Get(status)
+	if err != nil {
 		return nil, err
 	} else if !has {
-		status.IndexerType = indexerType
-		status.CommitSha = ""
+		status = &RepoIndexerStatus{RepoID: repo.ID, Branch: branch, IndexerType: indexerType, CommitSha: ""}
 	}
 	switch indexerType {
 	case RepoIndexerTypeCode:
@@ -90,14 +99,14 @@ func GetIndexerStatus(ctx context.Context, repo *Repository, indexerType RepoInd
 	return status, nil
 }
 
-// UpdateIndexerStatus updates indexer status
-func UpdateIndexerStatus(ctx context.Context, repo *Repository, indexerType RepoIndexerType, sha string) error {
-	status, err := GetIndexerStatus(ctx, repo, indexerType)
+// UpdateIndexerStatus updates indexer status for the given branch ("" = default branch).
+func UpdateIndexerStatus(ctx context.Context, repo *Repository, indexerType RepoIndexerType, branch, sha string) error {
+	status, err := GetIndexerStatus(ctx, repo, indexerType, branch)
 	if err != nil {
 		return fmt.Errorf("UpdateIndexerStatus: Unable to getIndexerStatus for repo: %s Error: %w", repo.FullName(), err)
 	}
 
-	if len(status.CommitSha) == 0 {
+	if status.ID == 0 {
 		status.CommitSha = sha
 		if err := db.Insert(ctx, status); err != nil {
 			return fmt.Errorf("UpdateIndexerStatus: Unable to insert repoIndexerStatus for repo: %s Sha: %s Error: %w", repo.FullName(), sha, err)

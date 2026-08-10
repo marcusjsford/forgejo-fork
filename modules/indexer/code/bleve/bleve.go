@@ -202,8 +202,9 @@ func (b *Indexer) addDelete(filename string, repo *repo_model.Repository, batch 
 	return batch.Delete(id)
 }
 
-// Index indexes the data
-func (b *Indexer) Index(ctx context.Context, repo *repo_model.Repository, sha string, changes *internal.RepoChanges) error {
+// Index indexes the data. branch is unused: bleve stores a single shard per repo
+// and only ever receives default-branch calls.
+func (b *Indexer) Index(ctx context.Context, repo *repo_model.Repository, branch, sha string, changes *internal.RepoChanges) error {
 	batch := inner_bleve.NewFlushingBatch(b.inner.Indexer, maxBatchSize)
 	if len(changes.Updates) > 0 {
 		r, err := gitrepo.OpenRepository(ctx, repo)

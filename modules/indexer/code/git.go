@@ -15,17 +15,17 @@ import (
 	"forgejo.org/modules/setting"
 )
 
-func getDefaultBranchSha(ctx context.Context, repo *repo_model.Repository) (string, error) {
-	stdout, _, err := git.NewCommand(ctx, "show-ref", "-s").AddDynamicArguments(git.BranchPrefix + repo.DefaultBranch).RunStdString(&git.RunOpts{Dir: repo.RepoPath()})
+func getBranchSha(ctx context.Context, repo *repo_model.Repository, branch string) (string, error) {
+	stdout, _, err := git.NewCommand(ctx, "show-ref", "-s").AddDynamicArguments(git.BranchPrefix + branch).RunStdString(&git.RunOpts{Dir: repo.RepoPath()})
 	if err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(stdout), nil
 }
 
-// getRepoChanges returns changes to repo since last indexer update
-func getRepoChanges(ctx context.Context, repo *repo_model.Repository, revision string) (*internal.RepoChanges, error) {
-	status, err := repo_model.GetIndexerStatus(ctx, repo, repo_model.RepoIndexerTypeCode)
+// getRepoChanges returns changes to repo's branch since that branch's last indexer update
+func getRepoChanges(ctx context.Context, repo *repo_model.Repository, branch, revision string) (*internal.RepoChanges, error) {
+	status, err := repo_model.GetIndexerStatus(ctx, repo, repo_model.RepoIndexerTypeCode, branch)
 	if err != nil {
 		return nil, err
 	}

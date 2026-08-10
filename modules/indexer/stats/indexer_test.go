@@ -38,7 +38,7 @@ func TestRepoStatsIndex(t *testing.T) {
 
 	require.NoError(t, queue.GetManager().FlushAll(t.Context(), 5*time.Second))
 
-	status, err := repo_model.GetIndexerStatus(db.DefaultContext, repo, repo_model.RepoIndexerTypeStats)
+	status, err := repo_model.GetIndexerStatus(db.DefaultContext, repo, repo_model.RepoIndexerTypeStats, "")
 	require.NoError(t, err)
 	assert.Equal(t, "65f1bf27bc3bf70f64657658635e66094edbcb4d", status.CommitSha)
 	langs, err := repo_model.GetTopLanguageStats(db.DefaultContext, repo, 5)

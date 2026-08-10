@@ -105,7 +105,7 @@ func (h *Indexer) Formatter() internal.ResultFormatter {
 // Zoekt is always called; the sidecar is called for each updated file.
 // If either fails: Zoekt failure is returned (hard error); sidecar failures
 // are logged and the pipeline continues (fail-open).
-func (h *Indexer) Index(ctx context.Context, repo *repo_model.Repository, sha string, changes *internal.RepoChanges) error {
+func (h *Indexer) Index(ctx context.Context, repo *repo_model.Repository, branch, sha string, changes *internal.RepoChanges) error {
 	ctx, span := tracer.Start(ctx, "hybrid.index")
 	defer span.End()
 
@@ -121,22 +121,21 @@ func (h *Indexer) Index(ctx context.Context, repo *repo_model.Repository, sha st
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := h.zoekt.Index(ctx, repo, sha, changes); err != nil {
+		if err := h.zoekt.Index(ctx, repo, branch, sha, changes); err != nil {
 			zoektErr = err
 		}
 	}()
 
 	// ── Sidecar /embed (sync, per file) ───────────────────────────────────
 	if len(changes.Updates) > 0 {
-		if err := h.indexFilesInSidecar(ctx, repo, sha, changes.Updates); err != nil {
+		if err := h.indexFilesInSidecar(ctx, repo, branch, sha, changes.Updates); err != nil {
 			// Fail-open: log sidecar errors, keep the pipeline alive
-			log.Warn("hybrid: sidecar index error for %s@%s: %v", repo.FullName(), sha, err)
+			log.Warn("hybrid: sidecar index error for %s@%s (branch %s): %v", repo.FullName(), sha, branch, err)
 		}
 	}
 
 	// ── Sidecar DELETE /embed (removed / renamed files) ───────────────────
 	if len(changes.RemovedFilenames) > 0 {
-		branch := repo.DefaultBranch
 		for _, path := range changes.RemovedFilenames {
 			if err := h.sidecar.deleteFile(ctx, repo.FullName(), branch, path); err != nil {
 				log.Warn("hybrid: sidecar delete %s/%s: %v", repo.FullName(), path, err)
@@ -154,7 +153,7 @@ func (h *Indexer) Index(ctx context.Context, repo *repo_model.Repository, sha st
 func (h *Indexer) indexFilesInSidecar(
 	ctx context.Context,
 	repo *repo_model.Repository,
-	sha string,
+	branch, sha string,
 	updates []internal.FileUpdate,
 ) error {
 	r, err := gitrepo.OpenRepository(ctx, repo)
@@ -168,8 +167,6 @@ func (h *Indexer) indexFilesInSidecar(
 		return err
 	}
 	defer gitBatch.Close()
-
-	branch := repo.DefaultBranch
 
 	for _, update := range updates {
 		if setting.Indexer.ExcludeVendored {

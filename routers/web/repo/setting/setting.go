@@ -76,14 +76,14 @@ func SettingsCtxData(ctx *context.Context) {
 
 	if ctx.Doer.IsAdmin {
 		if setting.Indexer.RepoIndexerEnabled {
-			status, err := repo_model.GetIndexerStatus(ctx, ctx.Repo.Repository, repo_model.RepoIndexerTypeCode)
+			status, err := repo_model.GetIndexerStatus(ctx, ctx.Repo.Repository, repo_model.RepoIndexerTypeCode, "")
 			if err != nil {
 				ctx.ServerError("repo.indexer_status", err)
 				return
 			}
 			ctx.Data["CodeIndexerStatus"] = status
 		}
-		status, err := repo_model.GetIndexerStatus(ctx, ctx.Repo.Repository, repo_model.RepoIndexerTypeStats)
+		status, err := repo_model.GetIndexerStatus(ctx, ctx.Repo.Repository, repo_model.RepoIndexerTypeStats, "")
 		if err != nil {
 			ctx.ServerError("repo.indexer_status", err)
 			return
@@ -805,7 +805,7 @@ func SettingsPost(ctx *context.Context) {
 				ctx.Error(http.StatusForbidden)
 				return
 			}
-			code.UpdateRepoIndexer(ctx.Repo.Repository)
+			code.UpdateRepoIndexer(ctx.Repo.Repository, "")
 		case "issues":
 			issues.UpdateRepoIndexer(ctx, ctx.Repo.Repository.ID)
 		default:

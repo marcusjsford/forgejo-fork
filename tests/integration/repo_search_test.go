@@ -61,7 +61,7 @@ func testSearchRepo(t *testing.T, indexer bool) {
 	require.NoError(t, err)
 
 	if indexer {
-		code_indexer.UpdateRepoIndexer(repo)
+		code_indexer.UpdateRepoIndexer(repo, "")
 	}
 
 	testSearch(t, "/user2/repo1/search?q=Description&page=1", []string{"README.md"}, indexer)
@@ -80,7 +80,7 @@ func testSearchRepo(t *testing.T, indexer bool) {
 	require.NoError(t, err)
 
 	if indexer {
-		code_indexer.UpdateRepoIndexer(repo)
+		code_indexer.UpdateRepoIndexer(repo, "")
 	}
 
 	testEmptySearch(t, indexer, true)
