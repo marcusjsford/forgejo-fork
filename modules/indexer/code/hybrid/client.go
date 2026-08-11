@@ -79,6 +79,144 @@ func (c *sidecarClient) embed(ctx context.Context, req embedRequest) (*embedResp
 	return &out, nil
 }
 
+// ── POST /graph/upsert ───────────────────────────────────────────────────────
+
+type graphUpsertRequest struct {
+	RepoFullName string `json:"repo_full_name"`
+	RepoID       int64  `json:"repo_id"`
+	Branch       string `json:"branch"`
+	Path         string `json:"path"`
+	Content      string `json:"content"`
+}
+
+type graphUpsertResponse struct {
+	SymbolsWritten  int `json:"symbols_written"`
+	EdgesWritten    int `json:"edges_written"`
+	EdgesUnresolved int `json:"edges_unresolved"`
+}
+
+// graphUpsert extracts Symbol/CALLS/IMPORTS/IMPLEMENTS/EXTENDS from a file
+// and writes them to Memgraph. Same request shape as embed (story 060,
+// graph-rag-implementation-plan.md §2) — the sidecar re-parses the same
+// content a second time internally (chunker.rs vs graph.rs, a deliberate
+// separate-walk design, see that module's doc comment), so this is a second
+// HTTP call, not a shared request body, even though both come from the same
+// blob read here.
+func (c *sidecarClient) graphUpsert(ctx context.Context, req graphUpsertRequest) (*graphUpsertResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/graph/upsert", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	c.setHeaders(httpReq)
+
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("sidecar /graph/upsert: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("sidecar /graph/upsert HTTP %d: %s", resp.StatusCode, b)
+	}
+
+	var out graphUpsertResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("sidecar /graph/upsert decode: %w", err)
+	}
+	return &out, nil
+}
+
+// ── DELETE /graph ────────────────────────────────────────────────────────────
+
+type deleteGraphRequest struct {
+	RepoFullName string `json:"repo_full_name"`
+	Branch       string `json:"branch"`
+	Path         string `json:"path"`
+}
+
+// deleteGraphFile removes a file's Symbol/graph nodes from Memgraph. Mirrors
+// deleteFile's request shape exactly so the push hook can fan the same
+// removed-file event out to both stores.
+func (c *sidecarClient) deleteGraphFile(ctx context.Context, repoFullName, branch, path string) error {
+	body, err := json.Marshal(deleteGraphRequest{RepoFullName: repoFullName, Branch: branch, Path: path})
+	if err != nil {
+		return err
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/graph", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	c.setHeaders(httpReq)
+
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("sidecar DELETE /graph: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("sidecar DELETE /graph HTTP %d: %s", resp.StatusCode, b)
+	}
+	return nil
+}
+
+// ── POST /graph/resolve ──────────────────────────────────────────────────────
+
+type graphResolveRequest struct {
+	RepoID int64  `json:"repo_id"`
+	Branch string `json:"branch"`
+}
+
+type graphResolveResponse struct {
+	CallsResolved    int `json:"calls_resolved"`
+	ImportsResolved  int `json:"imports_resolved"`
+	InheritsResolved int `json:"inherits_resolved"`
+}
+
+// graphResolve runs the Phase 5b resolution-phase job (story 060) for one
+// repo+branch, promoting unresolved CALLS/IMPORTS/IMPLEMENTS/EXTENDS
+// placeholder edges written during this push's /graph/upsert calls. Called
+// once per push, after every file's graphUpsert has completed — not per
+// file, since a call in one file may resolve against a symbol a different
+// file in the same push just added.
+func (c *sidecarClient) graphResolve(ctx context.Context, repoID int64, branch string) (*graphResolveResponse, error) {
+	body, err := json.Marshal(graphResolveRequest{RepoID: repoID, Branch: branch})
+	if err != nil {
+		return nil, err
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/graph/resolve", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	c.setHeaders(httpReq)
+
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("sidecar /graph/resolve: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("sidecar /graph/resolve HTTP %d: %s", resp.StatusCode, b)
+	}
+
+	var out graphResolveResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("sidecar /graph/resolve decode: %w", err)
+	}
+	return &out, nil
+}
+
 // ── DELETE /embed ────────────────────────────────────────────────────────────
 
 type deleteEmbedRequest struct {

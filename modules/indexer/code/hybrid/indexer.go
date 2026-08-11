@@ -126,7 +126,7 @@ func (h *Indexer) Index(ctx context.Context, repo *repo_model.Repository, branch
 		}
 	}()
 
-	// ── Sidecar /embed (sync, per file) ───────────────────────────────────
+	// ── Sidecar /embed + /graph/upsert (sync, per file) ───────────────────
 	if len(changes.Updates) > 0 {
 		if err := h.indexFilesInSidecar(ctx, repo, branch, sha, changes.Updates); err != nil {
 			// Fail-open: log sidecar errors, keep the pipeline alive
@@ -134,13 +134,34 @@ func (h *Indexer) Index(ctx context.Context, repo *repo_model.Repository, branch
 		}
 	}
 
-	// ── Sidecar DELETE /embed (removed / renamed files) ───────────────────
+	// ── Sidecar DELETE /embed + DELETE /graph (removed / renamed files) ──
 	if len(changes.RemovedFilenames) > 0 {
 		for _, path := range changes.RemovedFilenames {
 			if err := h.sidecar.deleteFile(ctx, repo.FullName(), branch, path); err != nil {
 				log.Warn("hybrid: sidecar delete %s/%s: %v", repo.FullName(), path, err)
 				// fail-open
 			}
+			if err := h.sidecar.deleteGraphFile(ctx, repo.FullName(), branch, path); err != nil {
+				log.Warn("hybrid: sidecar graph delete %s/%s: %v", repo.FullName(), path, err)
+				// fail-open
+			}
+		}
+	}
+
+	// ── Sidecar /graph/resolve (Phase 5b resolution phase, story 060) ────
+	// Once per push, after every file's /graph/upsert above has completed —
+	// not per file, since a call in one file may resolve against a symbol a
+	// different file in the same push just added
+	// (graph-rag-implementation-plan.md §3).
+	if len(changes.Updates) > 0 || len(changes.RemovedFilenames) > 0 {
+		if resolved, err := h.sidecar.graphResolve(ctx, repo.ID, branch); err != nil {
+			log.Warn("hybrid: sidecar graph resolve %s@%s (branch %s): %v", repo.FullName(), sha, branch, err)
+			// fail-open
+		} else {
+			log.Trace(
+				"hybrid: graph resolve %s@%s (branch %s): %d calls, %d imports, %d inherits promoted to heuristic",
+				repo.FullName(), sha, branch, resolved.CallsResolved, resolved.ImportsResolved, resolved.InheritsResolved,
+			)
 		}
 	}
 
@@ -194,6 +215,17 @@ func (h *Indexer) indexFilesInSidecar(
 			Content:      content,
 		}); err != nil {
 			log.Warn("hybrid: sidecar embed %s/%s: %v", repo.FullName(), update.Filename, err)
+			// continue — fail-open
+		}
+
+		if _, err := h.sidecar.graphUpsert(ctx, graphUpsertRequest{
+			RepoFullName: repo.FullName(),
+			RepoID:       repo.ID,
+			Branch:       branch,
+			Path:         update.Filename,
+			Content:      content,
+		}); err != nil {
+			log.Warn("hybrid: sidecar graph upsert %s/%s: %v", repo.FullName(), update.Filename, err)
 			// continue — fail-open
 		}
 	}
