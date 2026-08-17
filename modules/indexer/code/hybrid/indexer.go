@@ -126,7 +126,7 @@ func (h *Indexer) Index(ctx context.Context, repo *repo_model.Repository, branch
 		}
 	}()
 
-	// ── Sidecar /embed + /graph/upsert (sync, per file) ───────────────────
+	// ── Sidecar /index (sync, per file) ────────────────────────────────────
 	if len(changes.Updates) > 0 {
 		if err := h.indexFilesInSidecar(ctx, repo, branch, sha, changes.Updates); err != nil {
 			// Fail-open: log sidecar errors, keep the pipeline alive
@@ -134,23 +134,19 @@ func (h *Indexer) Index(ctx context.Context, repo *repo_model.Repository, branch
 		}
 	}
 
-	// ── Sidecar DELETE /embed + DELETE /graph (removed / renamed files) ──
+	// ── Sidecar DELETE /index (removed / renamed files) ───────────────────
 	if len(changes.RemovedFilenames) > 0 {
 		for _, path := range changes.RemovedFilenames {
-			if err := h.sidecar.deleteFile(ctx, repo.FullName(), branch, path); err != nil {
+			if err := h.sidecar.deleteIndexedFile(ctx, repo.FullName(), branch, path); err != nil {
 				log.Warn("hybrid: sidecar delete %s/%s: %v", repo.FullName(), path, err)
-				// fail-open
-			}
-			if err := h.sidecar.deleteGraphFile(ctx, repo.FullName(), branch, path); err != nil {
-				log.Warn("hybrid: sidecar graph delete %s/%s: %v", repo.FullName(), path, err)
 				// fail-open
 			}
 		}
 	}
 
 	// ── Sidecar /graph/resolve (Phase 5b resolution phase, story 060) ────
-	// Once per push, after every file's /graph/upsert above has completed —
-	// not per file, since a call in one file may resolve against a symbol a
+	// Once per push, after every file's /index above has completed — not
+	// per file, since a call in one file may resolve against a symbol a
 	// different file in the same push just added
 	// (graph-rag-implementation-plan.md §3).
 	if len(changes.Updates) > 0 || len(changes.RemovedFilenames) > 0 {
@@ -169,7 +165,7 @@ func (h *Indexer) Index(ctx context.Context, repo *repo_model.Repository, branch
 	return zoektErr
 }
 
-// indexFilesInSidecar reads blob content from git and calls POST /embed for
+// indexFilesInSidecar reads blob content from git and calls POST /index for
 // each updated file, using the same batch-reader pattern as the bleve indexer.
 func (h *Indexer) indexFilesInSidecar(
 	ctx context.Context,
@@ -207,25 +203,14 @@ func (h *Indexer) indexFilesInSidecar(
 			continue
 		}
 
-		if _, err := h.sidecar.embed(ctx, embedRequest{
+		if _, err := h.sidecar.index(ctx, indexRequest{
 			RepoFullName: repo.FullName(),
 			RepoID:       repo.ID,
 			Branch:       branch,
 			Path:         update.Filename,
 			Content:      content,
 		}); err != nil {
-			log.Warn("hybrid: sidecar embed %s/%s: %v", repo.FullName(), update.Filename, err)
-			// continue — fail-open
-		}
-
-		if _, err := h.sidecar.graphUpsert(ctx, graphUpsertRequest{
-			RepoFullName: repo.FullName(),
-			RepoID:       repo.ID,
-			Branch:       branch,
-			Path:         update.Filename,
-			Content:      content,
-		}); err != nil {
-			log.Warn("hybrid: sidecar graph upsert %s/%s: %v", repo.FullName(), update.Filename, err)
+			log.Warn("hybrid: sidecar index %s/%s: %v", repo.FullName(), update.Filename, err)
 			// continue — fail-open
 		}
 	}

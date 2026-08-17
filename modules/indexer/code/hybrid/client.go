@@ -35,9 +35,9 @@ func newSidecarClient(baseURL, token string) *sidecarClient {
 	}
 }
 
-// ── /embed ────────────────────────────────────────────────────────────────────
+// ── POST /index ───────────────────────────────────────────────────────────────
 
-type embedRequest struct {
+type indexRequest struct {
 	RepoFullName string `json:"repo_full_name"`
 	RepoID       int64  `json:"repo_id"`
 	Branch       string `json:"branch"`
@@ -45,70 +45,26 @@ type embedRequest struct {
 	Content      string `json:"content"`
 }
 
-type embedResponse struct {
-	ChunksIndexed int `json:"chunks_indexed"`
-}
-
-func (c *sidecarClient) embed(ctx context.Context, req embedRequest) (*embedResponse, error) {
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, err
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/embed", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	c.setHeaders(httpReq)
-
-	resp, err := c.http.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("sidecar /embed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("sidecar /embed HTTP %d: %s", resp.StatusCode, b)
-	}
-
-	var out embedResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, fmt.Errorf("sidecar /embed decode: %w", err)
-	}
-	return &out, nil
-}
-
-// ── POST /graph/upsert ───────────────────────────────────────────────────────
-
-type graphUpsertRequest struct {
-	RepoFullName string `json:"repo_full_name"`
-	RepoID       int64  `json:"repo_id"`
-	Branch       string `json:"branch"`
-	Path         string `json:"path"`
-	Content      string `json:"content"`
-}
-
-type graphUpsertResponse struct {
+type indexResponse struct {
+	ChunksIndexed   int `json:"chunks_indexed"`
 	SymbolsWritten  int `json:"symbols_written"`
 	EdgesWritten    int `json:"edges_written"`
 	EdgesUnresolved int `json:"edges_unresolved"`
 }
 
-// graphUpsert extracts Symbol/CALLS/IMPORTS/IMPLEMENTS/EXTENDS from a file
-// and writes them to Memgraph. Same request shape as embed (story 060,
-// graph-rag-implementation-plan.md §2) — the sidecar re-parses the same
-// content a second time internally (chunker.rs vs graph.rs, a deliberate
-// separate-walk design, see that module's doc comment), so this is a second
-// HTTP call, not a shared request body, even though both come from the same
-// blob read here.
-func (c *sidecarClient) graphUpsert(ctx context.Context, req graphUpsertRequest) (*graphUpsertResponse, error) {
+// index chunks+embeds a file into Qdrant and extracts+upserts its
+// Symbol/CALLS/IMPORTS/IMPLEMENTS/EXTENDS into Memgraph, in one call.
+// Used to be two separate HTTP calls (embed, then graphUpsert) against an
+// identical request shape — the sidecar now runs both concurrently
+// server-side instead of this client serializing them (story 160,
+// planning/stories/160-unified-sidecar-index-endpoint/).
+func (c *sidecarClient) index(ctx context.Context, req indexRequest) (*indexResponse, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/graph/upsert", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/index", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -116,40 +72,40 @@ func (c *sidecarClient) graphUpsert(ctx context.Context, req graphUpsertRequest)
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("sidecar /graph/upsert: %w", err)
+		return nil, fmt.Errorf("sidecar /index: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("sidecar /graph/upsert HTTP %d: %s", resp.StatusCode, b)
+		return nil, fmt.Errorf("sidecar /index HTTP %d: %s", resp.StatusCode, b)
 	}
 
-	var out graphUpsertResponse
+	var out indexResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, fmt.Errorf("sidecar /graph/upsert decode: %w", err)
+		return nil, fmt.Errorf("sidecar /index decode: %w", err)
 	}
 	return &out, nil
 }
 
-// ── DELETE /graph ────────────────────────────────────────────────────────────
+// ── DELETE /index ────────────────────────────────────────────────────────────
 
-type deleteGraphRequest struct {
+type deleteIndexRequest struct {
 	RepoFullName string `json:"repo_full_name"`
 	Branch       string `json:"branch"`
 	Path         string `json:"path"`
 }
 
-// deleteGraphFile removes a file's Symbol/graph nodes from Memgraph. Mirrors
-// deleteFile's request shape exactly so the push hook can fan the same
-// removed-file event out to both stores.
-func (c *sidecarClient) deleteGraphFile(ctx context.Context, repoFullName, branch, path string) error {
-	body, err := json.Marshal(deleteGraphRequest{RepoFullName: repoFullName, Branch: branch, Path: path})
+// deleteIndexedFile removes a file's Qdrant vectors and Memgraph graph nodes
+// in one call (used to be deleteFile + deleteGraphFile, two calls against an
+// identical request shape — story 160).
+func (c *sidecarClient) deleteIndexedFile(ctx context.Context, repoFullName, branch, path string) error {
+	body, err := json.Marshal(deleteIndexRequest{RepoFullName: repoFullName, Branch: branch, Path: path})
 	if err != nil {
 		return err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/graph", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/index", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -157,13 +113,13 @@ func (c *sidecarClient) deleteGraphFile(ctx context.Context, repoFullName, branc
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("sidecar DELETE /graph: %w", err)
+		return fmt.Errorf("sidecar DELETE /index: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("sidecar DELETE /graph HTTP %d: %s", resp.StatusCode, b)
+		return fmt.Errorf("sidecar DELETE /index HTTP %d: %s", resp.StatusCode, b)
 	}
 	return nil
 }
@@ -183,10 +139,10 @@ type graphResolveResponse struct {
 
 // graphResolve runs the Phase 5b resolution-phase job (story 060) for one
 // repo+branch, promoting unresolved CALLS/IMPORTS/IMPLEMENTS/EXTENDS
-// placeholder edges written during this push's /graph/upsert calls. Called
-// once per push, after every file's graphUpsert has completed — not per
-// file, since a call in one file may resolve against a symbol a different
-// file in the same push just added.
+// placeholder edges written during this push's /index calls. Called once
+// per push, after every file's index call has completed — not per file,
+// since a call in one file may resolve against a symbol a different file
+// in the same push just added.
 func (c *sidecarClient) graphResolve(ctx context.Context, repoID int64, branch string) (*graphResolveResponse, error) {
 	body, err := json.Marshal(graphResolveRequest{RepoID: repoID, Branch: branch})
 	if err != nil {
@@ -217,45 +173,6 @@ func (c *sidecarClient) graphResolve(ctx context.Context, repoID int64, branch s
 	return &out, nil
 }
 
-// ── DELETE /embed ────────────────────────────────────────────────────────────
-
-type deleteEmbedRequest struct {
-	RepoFullName string `json:"repo_full_name"`
-	Branch       string `json:"branch"`
-	Path         string `json:"path"`
-}
-
-// deleteFile removes all Qdrant vectors for a specific file from the sidecar.
-func (c *sidecarClient) deleteFile(ctx context.Context, repoFullName, branch, path string) error {
-	req := deleteEmbedRequest{
-		RepoFullName: repoFullName,
-		Branch:       branch,
-		Path:         path,
-	}
-	body, err := json.Marshal(req)
-	if err != nil {
-		return err
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/embed", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	c.setHeaders(httpReq)
-
-	resp, err := c.http.Do(httpReq)
-	if err != nil {
-		return fmt.Errorf("sidecar DELETE /embed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("sidecar DELETE /embed HTTP %d: %s", resp.StatusCode, b)
-	}
-	return nil
-}
-
 // ── DELETE /embed/repo ───────────────────────────────────────────────────────
 
 type deleteEmbedByRepoRequest struct {
@@ -264,7 +181,9 @@ type deleteEmbedByRepoRequest struct {
 
 // deleteByRepoID removes all Qdrant vectors for an entire repository from the
 // sidecar, via the dedicated repo-scoped delete endpoint (distinct from the
-// per-file DELETE /embed — a repo delete has no path/branch to scope by).
+// per-file DELETE /index — a repo delete has no path/branch to scope by).
+// No graph equivalent exists for this repo-wide case (out of scope for
+// story 160 — see its plan.md).
 func (c *sidecarClient) deleteByRepoID(ctx context.Context, repoID int64) error {
 	body, err := json.Marshal(deleteEmbedByRepoRequest{RepoID: repoID})
 	if err != nil {
