@@ -179,11 +179,14 @@ type deleteEmbedByRepoRequest struct {
 	RepoID int64 `json:"repo_id"`
 }
 
-// deleteByRepoID removes all Qdrant vectors for an entire repository from the
-// sidecar, via the dedicated repo-scoped delete endpoint (distinct from the
-// per-file DELETE /index — a repo delete has no path/branch to scope by).
-// No graph equivalent exists for this repo-wide case (out of scope for
-// story 160 — see its plan.md).
+// deleteByRepoID removes all Qdrant vectors AND all Memgraph File/Symbol/
+// Package nodes+edges for an entire repository from the sidecar, via the
+// dedicated repo-scoped delete endpoint (distinct from the per-file DELETE
+// /index — a repo delete has no path/branch to scope by). Story 170 extended
+// the sidecar's own /embed/repo handler to fan out to both stores
+// server-side (matching /index's own do_embed+do_graph_upsert shape) — this
+// is still exactly one HTTP call, same as before; the sidecar, not this Go
+// code, knows there are two stores behind it.
 func (c *sidecarClient) deleteByRepoID(ctx context.Context, repoID int64) error {
 	body, err := json.Marshal(deleteEmbedByRepoRequest{RepoID: repoID})
 	if err != nil {

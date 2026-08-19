@@ -270,10 +270,12 @@ func readBlobContent(
 	return string(charset.ToUTF8DropErrors(fileBytes, charset.ConvertOpts{})), nil
 }
 
-// Delete removes the repository's chunks from the sidecar (Qdrant) and from
-// the Zoekt index.
+// Delete removes the repository's chunks from the sidecar (both Qdrant and,
+// as of story 170, Memgraph — the sidecar's own /embed/repo handler fans out
+// to both stores server-side, so this stays a single call) and from the
+// Zoekt index.
 func (h *Indexer) Delete(ctx context.Context, repoID int64) error {
-	// Sidecar delete: Qdrant filter delete by repo_id
+	// Sidecar delete: repo-scoped delete across Qdrant + Memgraph, one call.
 	if err := h.sidecar.deleteByRepoID(ctx, repoID); err != nil {
 		log.Warn("hybrid: sidecar delete repoID=%d: %v", repoID, err)
 	}
