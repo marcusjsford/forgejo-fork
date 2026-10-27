@@ -29,6 +29,8 @@ import (
 	"github.com/go-enry/go-enry/v2"
 
 	zoektindexer "forgejo.org/modules/indexer/code/zoekt"
+
+	"xorm.io/builder"
 )
 
 // Indexer is the top-level hybrid code indexer.
@@ -323,14 +325,21 @@ func (h *Indexer) Search(ctx context.Context, opts *internal.SearchOptions) (int
 	// where the user explicitly wants only literal matches from Zoekt.
 	// opts.RepoIDs is the ACL-filtered set Forgejo already computed; pass it
 	// directly so Qdrant only returns chunks the requesting user may read.
-	// A nil slice means admin/unrestricted; an empty slice means no access.
+	// A nil slice means admin/unrestricted (routers/web/explore/code.go); an
+	// empty slice means no access.
 	go func() {
 		if opts.Mode == internal.CodeSearchModeExact {
 			sCh <- semanticOut{}
 			return
 		}
 		t := time.Now()
-		raw, err := h.sidecar.search(ctx, opts.Keyword, opts.RepoIDs, h.semanticLimit)
+		repoIDs, err := sidecarRepoIDs(ctx, opts.RepoIDs)
+		if err != nil {
+			searchErrors.WithLabelValues("sidecar").Inc()
+			sCh <- semanticOut{err: err}
+			return
+		}
+		raw, err := h.sidecar.search(ctx, opts.Keyword, repoIDs, h.semanticLimit)
 		searchDuration.WithLabelValues("sidecar").Observe(time.Since(t).Seconds())
 		if err != nil {
 			searchErrors.WithLabelValues("sidecar").Inc()
@@ -384,4 +393,25 @@ func convertSidecarResults(raw []sidecarSearchResult) []*internal.SearchResult {
 		})
 	}
 	return out
+}
+
+// sidecarRepoIDs turns Forgejo's permitted set into the sidecar's scope.
+//
+// The sidecar requires an explicit repo list on every read and has no
+// unrestricted form for Forgejo (code-indexer platform story 010): asking for
+// every repo needs an operator credential Forgejo does not hold. So Forgejo's
+// own "unrestricted" — a nil RepoIDs, which only an admin's site-wide search
+// produces — becomes every repository id this instance has. That is also the
+// right answer, not just the permitted one: Forgejo's search shows Forgejo's
+// repos, and the sidecar may index repos from other sources that an admin of
+// this forge has no claim to.
+func sidecarRepoIDs(ctx context.Context, repoIDs []int64) ([]int64, error) {
+	if repoIDs != nil {
+		return repoIDs, nil
+	}
+	ids, err := repo_model.SearchRepositoryIDsByCondition(ctx, builder.NewCond())
+	if err != nil {
+		return nil, fmt.Errorf("hybrid: list repository ids for an unrestricted search: %w", err)
+	}
+	return ids, nil
 }

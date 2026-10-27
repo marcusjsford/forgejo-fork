@@ -214,10 +214,21 @@ func (c *sidecarClient) deleteByRepoID(ctx context.Context, repoID int64) error 
 
 // ── /search ───────────────────────────────────────────────────────────────────
 
+// sidecarScope is the repo scope every sidecar read requires (code-indexer
+// platform story 010). Forgejo only ever sends the repo_ids form: the
+// unrestricted form ({"all": true}) needs the sidecar's operator credential,
+// which Forgejo deliberately does not hold.
+type sidecarScope struct {
+	// No omitempty: an empty list must reach the sidecar as [] ("this user may
+	// see nothing", which returns nothing). Omitting it used to drop the field,
+	// and the sidecar read an absent repo_ids as "unrestricted".
+	RepoIDs []int64 `json:"repo_ids"`
+}
+
 type sidecarSearchRequest struct {
-	Query   string  `json:"query"`
-	RepoIDs []int64 `json:"repo_ids,omitempty"` // ACL-filtered set of allowed repo IDs
-	Limit   int     `json:"limit,omitempty"`
+	Query string       `json:"query"`
+	Scope sidecarScope `json:"scope"` // ACL-filtered set of allowed repo IDs
+	Limit int          `json:"limit,omitempty"`
 }
 
 type sidecarSearchResult struct {
@@ -237,10 +248,16 @@ type sidecarSearchResponse struct {
 }
 
 func (c *sidecarClient) search(ctx context.Context, query string, repoIDs []int64, limit int) ([]sidecarSearchResult, error) {
+	if repoIDs == nil {
+		// A nil slice marshals as null, which the sidecar rejects as a scope
+		// with neither form. The caller resolves "unrestricted" to real ids
+		// before this point (Indexer.Search), so nil here can only mean none.
+		repoIDs = []int64{}
+	}
 	reqBody := sidecarSearchRequest{
-		Query:   query,
-		RepoIDs: repoIDs,
-		Limit:   limit,
+		Query: query,
+		Scope: sidecarScope{RepoIDs: repoIDs},
+		Limit: limit,
 	}
 	body, err := json.Marshal(reqBody)
 	if err != nil {
