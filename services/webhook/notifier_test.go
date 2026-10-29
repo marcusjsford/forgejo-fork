@@ -123,6 +123,23 @@ func TestPushCommits(t *testing.T) {
 	})
 }
 
+func TestRenameRepository(t *testing.T) {
+	defer unittest.OverrideFixtures("services/webhook/TestPushCommits")()
+	require.NoError(t, unittest.PrepareTestDatabase())
+
+	user := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 2})
+	repo := unittest.AssertExistsAndLoadBean(t, &repo_model.Repository{ID: 2, OwnerID: user.ID})
+
+	NewNotifier().RenameRepository(db.DefaultContext, user, repo, "old-name")
+
+	hookTask := unittest.AssertExistsAndLoadBean(t, &webhook_model.HookTask{}, unittest.Cond("payload_content LIKE '%\"renamed\"%'"))
+
+	var payload structs.RepositoryPayload
+	require.NoError(t, json.Unmarshal([]byte(hookTask.PayloadContent), &payload))
+	assert.Equal(t, structs.HookRepoRenamed, payload.Action)
+	assert.Equal(t, repo.FullName(), payload.Repository.FullName)
+}
+
 func assertActionEqual(t *testing.T, expectedRun *actions_model.ActionRun, actualRun *structs.ActionRun) {
 	assert.NotNil(t, expectedRun)
 	assert.NotNil(t, actualRun)

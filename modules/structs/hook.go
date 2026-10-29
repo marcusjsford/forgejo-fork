@@ -446,6 +446,11 @@ const (
 	HookRepoCreated HookRepoAction = "created"
 	// HookRepoDeleted deleted
 	HookRepoDeleted HookRepoAction = "deleted"
+	// HookRepoRenamed renamed. Not part of upstream's enum: webhookNotifier
+	// embeds NullNotifier and never emitted a repository event for a rename,
+	// so a rename reached no webhook and no indexer. Platform story 070 needs
+	// it to keep the control plane's registry identity current.
+	HookRepoRenamed HookRepoAction = "renamed"
 )
 
 // RepositoryPayload payload for repository webhooks

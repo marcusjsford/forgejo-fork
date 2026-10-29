@@ -43,6 +43,14 @@ var Indexer = struct {
 	HybridSidecarToken  string // X-Indexer-Token secret
 	HybridRRFK          int    // RRF rank fusion constant k (default 60)
 	HybridSemanticLimit int    // Max sidecar (semantic) results before RRF (default 20)
+	// The control plane's change-notification endpoint, e.g.
+	// http://control-plane:8090/events/local-forgejo. The last path segment
+	// must be the source id configured in the control plane. Empty disables
+	// the notifier (platform story 070).
+	HybridEventsURL string
+	// HMAC-SHA256 secret shared with that source. The body is signed exactly as
+	// sent, in X-Forgejo-Signature, same as Forgejo's own webhooks.
+	HybridEventsSecret string
 }{
 	IssueType:        "bleve",
 	IssuePath:        "indexers/issues.bleve",
@@ -125,6 +133,8 @@ func loadIndexerFrom(rootCfg ConfigProvider) {
 		Indexer.HybridSidecarToken = hsec.Key("SIDECAR_TOKEN").MustString("")
 		Indexer.HybridRRFK = hsec.Key("RRF_K").MustInt(Indexer.HybridRRFK)
 		Indexer.HybridSemanticLimit = hsec.Key("SEMANTIC_LIMIT").MustInt(Indexer.HybridSemanticLimit)
+		Indexer.HybridEventsURL = hsec.Key("EVENTS_URL").MustString("")
+		Indexer.HybridEventsSecret = hsec.Key("EVENTS_SECRET").MustString("")
 	}
 }
 

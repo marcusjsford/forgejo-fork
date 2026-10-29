@@ -8,24 +8,16 @@
 package hybrid
 
 import (
-	"bufio"
 	"context"
 	"fmt"
-	"io"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
 	repo_model "forgejo.org/models/repo"
-	"forgejo.org/modules/charset"
-	"forgejo.org/modules/git"
-	"forgejo.org/modules/gitrepo"
 	"forgejo.org/modules/indexer/code/internal"
 	indexer_internal "forgejo.org/modules/indexer/internal"
 	"forgejo.org/modules/log"
 	"forgejo.org/modules/setting"
-	"forgejo.org/modules/typesniffer"
 	"github.com/go-enry/go-enry/v2"
 
 	zoektindexer "forgejo.org/modules/indexer/code/zoekt"
@@ -41,8 +33,9 @@ type Indexer struct {
 	// zoekt is Forgejo's own native, in-process Zoekt indexer (embedded as of
 	// v16 — no external zoekt-webserver/zoekt-indexserver HTTP round-trip).
 	// It writes its shards to setting.Indexer.RepoPath, same as bleve would.
-	zoekt   *zoektindexer.Indexer
-	sidecar *sidecarClient
+	zoekt    *zoektindexer.Indexer
+	sidecar  *sidecarClient
+	notifier *changeNotifier
 
 	rrfK          int
 	semanticLimit int
@@ -59,6 +52,7 @@ func NewIndexer() *Indexer {
 		Indexer:       indexer_internal.NewDummyIndexer(),
 		zoekt:         zoektindexer.NewIndexer(cfg.RepoPath),
 		sidecar:       newSidecarClient(cfg.HybridSidecarURL, cfg.HybridSidecarToken),
+		notifier:      newChangeNotifier(cfg.HybridEventsURL, cfg.HybridEventsSecret),
 		rrfK:          cfg.HybridRRFK,
 		semanticLimit: cfg.HybridSemanticLimit,
 	}
@@ -103,10 +97,11 @@ func (h *Indexer) Formatter() internal.ResultFormatter {
 
 // ── code/internal.Indexer ─────────────────────────────────────────────────────
 
-// Index fans out to Zoekt and the embedding sidecar in parallel.
-// Zoekt is always called; the sidecar is called for each updated file.
-// If either fails: Zoekt failure is returned (hard error); sidecar failures
-// are logged and the pipeline continues (fail-open).
+// Index notifies the control plane that this repo/ref now points at sha, and
+// keeps Forgejo's own embedded Zoekt current until story 100 removes it.
+// The semantic sidecar is not called at all: it no longer receives file
+// content from Forgejo, and the control plane fetches and indexes the head
+// itself (platform story 070).
 func (h *Indexer) Index(ctx context.Context, repo *repo_model.Repository, branch, sha string, changes *internal.RepoChanges) error {
 	ctx, span := tracer.Start(ctx, "hybrid.index")
 	defer span.End()
@@ -116,10 +111,13 @@ func (h *Indexer) Index(ctx context.Context, repo *repo_model.Repository, branch
 		indexDuration.Observe(time.Since(indexStart).Seconds())
 		indexedFiles.Observe(float64(len(changes.Updates)))
 	}()
-	var wg sync.WaitGroup
-	var zoektErr error
 
-	// ── Fan-out: Zoekt (async, in-process — no network round-trip) ────────
+	var wg sync.WaitGroup
+	var zoektErr, notifyErr error
+
+	// Forgejo's search UI still reads from the embedded Zoekt shards until
+	// story 100 moves all search behind the control plane. Its failure remains
+	// the hard error, exactly as before.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -128,160 +126,44 @@ func (h *Indexer) Index(ctx context.Context, repo *repo_model.Repository, branch
 		}
 	}()
 
-	// ── Sidecar /index (sync, per file) ────────────────────────────────────
-	if len(changes.Updates) > 0 {
-		if err := h.indexFilesInSidecar(ctx, repo, branch, sha, changes.Updates); err != nil {
-			// Fail-open: log sidecar errors, keep the pipeline alive
-			log.Warn("hybrid: sidecar index error for %s@%s (branch %s): %v", repo.FullName(), sha, branch, err)
-		}
-	}
-
-	// ── Sidecar DELETE /index (removed / renamed files) ───────────────────
-	if len(changes.RemovedFilenames) > 0 {
-		for _, path := range changes.RemovedFilenames {
-			if err := h.sidecar.deleteIndexedFile(ctx, repo.FullName(), branch, path); err != nil {
-				log.Warn("hybrid: sidecar delete %s/%s: %v", repo.FullName(), path, err)
-				// fail-open
-			}
-		}
-	}
-
-	// ── Sidecar /graph/resolve (Phase 5b resolution phase, story 060) ────
-	// Once per push, after every file's /index above has completed — not
-	// per file, since a call in one file may resolve against a symbol a
-	// different file in the same push just added
-	// (graph-rag-implementation-plan.md §3).
-	if len(changes.Updates) > 0 || len(changes.RemovedFilenames) > 0 {
-		if resolved, err := h.sidecar.graphResolve(ctx, repo.ID, branch); err != nil {
-			log.Warn("hybrid: sidecar graph resolve %s@%s (branch %s): %v", repo.FullName(), sha, branch, err)
-			// fail-open
-		} else {
-			log.Trace(
-				"hybrid: graph resolve %s@%s (branch %s): %d calls, %d imports, %d inherits promoted to heuristic",
-				repo.FullName(), sha, branch, resolved.CallsResolved, resolved.ImportsResolved, resolved.InheritsResolved,
-			)
-		}
+	// One signed notification per completed push/mirror sync. No blob reads,
+	// no per-file calls, no deletes, no graph-resolution request.
+	if h.notifier != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			notifyErr = h.notifier.notifyChange(ctx, repo, branch, sha)
+		}()
 	}
 
 	wg.Wait()
-	return zoektErr
-}
-
-// indexFilesInSidecar reads blob content from git and calls POST /index for
-// each updated file, using the same batch-reader pattern as the bleve indexer.
-func (h *Indexer) indexFilesInSidecar(
-	ctx context.Context,
-	repo *repo_model.Repository,
-	branch, sha string,
-	updates []internal.FileUpdate,
-) error {
-	r, err := gitrepo.OpenRepository(ctx, repo)
-	if err != nil {
-		return err
+	if zoektErr != nil {
+		return zoektErr
 	}
-	defer r.Close()
-
-	gitBatch, err := r.NewBatch(ctx)
-	if err != nil {
-		return err
-	}
-	defer gitBatch.Close()
-
-	for _, update := range updates {
-		if setting.Indexer.ExcludeVendored {
-			// Reuse Forgejo's vendor-path detection if available
-			if strings.Contains(update.Filename, "/vendor/") ||
-				strings.HasPrefix(update.Filename, "vendor/") {
-				continue
-			}
-		}
-
-		content, err := readBlobContent(ctx, r, gitBatch.Writer, gitBatch.Reader, update)
-		if err != nil {
-			log.Warn("hybrid: reading blob %s/%s: %v", repo.FullName(), update.Filename, err)
-			continue
-		}
-		if content == "" {
-			continue
-		}
-
-		if _, err := h.sidecar.index(ctx, indexRequest{
-			RepoFullName: repo.FullName(),
-			RepoID:       repo.ID,
-			Branch:       branch,
-			Path:         update.Filename,
-			Content:      content,
-		}); err != nil {
-			log.Warn("hybrid: sidecar index %s/%s: %v", repo.FullName(), update.Filename, err)
-			// continue — fail-open
-		}
+	if notifyErr != nil {
+		// Returned unhandled so Forgejo's persistent queue retries it after 5 s
+		// (modules/queue/workergroup.go); the notification is the only signal
+		// the platform gets, so losing it is not fail-open.
+		return fmt.Errorf("hybrid: change notification: %w", notifyErr)
 	}
 	return nil
 }
 
-// readBlobContent reads a file's text content from git via cat-file batch.
-// Returns an empty string for binary files or files exceeding MaxIndexerFileSize.
-func readBlobContent(
-	ctx context.Context,
-	_ *git.Repository,
-	batchWriter git.WriteCloserError,
-	batchReader *bufio.Reader,
-	update internal.FileUpdate,
-) (string, error) {
-	size := update.Size
-	var err error
-
-	if !update.Sized {
-		var stdout string
-		stdout, _, err = git.NewCommand(ctx, "cat-file", "-s").
-			AddDynamicArguments(update.BlobSha).
-			RunStdString(&git.RunOpts{})
-		if err != nil {
-			return "", err
-		}
-		if size, err = strconv.ParseInt(strings.TrimSpace(stdout), 10, 64); err != nil {
-			return "", fmt.Errorf("misformatted git cat-file output: %w", err)
-		}
-	}
-
-	if size > setting.Indexer.MaxIndexerFileSize {
-		return "", nil
-	}
-
-	if _, err := batchWriter.Write([]byte(update.BlobSha + "\n")); err != nil {
-		return "", err
-	}
-
-	_, _, size, err = git.ReadBatchLine(batchReader)
-	if err != nil {
-		return "", err
-	}
-
-	fileBytes, err := io.ReadAll(io.LimitReader(batchReader, size))
-	if err != nil {
-		return "", err
-	}
-	if _, err := batchReader.Discard(1); err != nil {
-		return "", err
-	}
-
-	if !typesniffer.DetectContentType(fileBytes, update.Filename).IsText() {
-		return "", nil
-	}
-
-	return string(charset.ToUTF8DropErrors(fileBytes, charset.ConvertOpts{})), nil
-}
-
-// Delete removes the repository's chunks from the sidecar (both Qdrant and,
-// as of story 170, Memgraph — the sidecar's own /embed/repo handler fans out
-// to both stores server-side, so this stays a single call) and from the
-// Zoekt index.
+// Delete tells the control plane the repository is gone, then removes the
+// embedded Zoekt shard. The sidecar's repo-scoped delete is no longer called:
+// the platform owns that store's lifecycle from story 070 onwards.
 func (h *Indexer) Delete(ctx context.Context, repoID int64) error {
-	// Sidecar delete: repo-scoped delete across Qdrant + Memgraph, one call.
-	if err := h.sidecar.deleteByRepoID(ctx, repoID); err != nil {
-		log.Warn("hybrid: sidecar delete repoID=%d: %v", repoID, err)
+	var notifyErr error
+	if h.notifier != nil {
+		notifyErr = h.notifier.notifyDeleted(ctx, repoID)
 	}
-	return h.zoekt.Delete(ctx, repoID)
+	if err := h.zoekt.Delete(ctx, repoID); err != nil {
+		return err
+	}
+	if notifyErr != nil {
+		return fmt.Errorf("hybrid: repo_deleted notification: %w", notifyErr)
+	}
+	return nil
 }
 
 // ── Search ────────────────────────────────────────────────────────────────────

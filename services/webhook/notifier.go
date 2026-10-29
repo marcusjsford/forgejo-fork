@@ -129,6 +129,21 @@ func (m *webhookNotifier) DeleteRepository(ctx context.Context, doer *user_model
 	}
 }
 
+func (m *webhookNotifier) RenameRepository(ctx context.Context, doer *user_model.User, repo *repo_model.Repository, oldRepoName string) {
+	// Upstream's repository payload has only created/deleted actions and the
+	// webhook notifier never overrode RenameRepository, so this is a new event
+	// type for the same destination. The control plane resolves the repo by
+	// its stable id and treats the new name as an alias update.
+	if err := PrepareWebhooks(ctx, EventSource{Repository: repo}, webhook_module.HookEventRepository, &api.RepositoryPayload{
+		Action:       api.HookRepoRenamed,
+		Repository:   convert.ToRepo(ctx, repo, access_model.Permission{AccessMode: perm.AccessModeOwner}),
+		Organization: convert.ToUser(ctx, repo.MustOwner(ctx), nil),
+		Sender:       convert.ToUser(ctx, doer, nil),
+	}); err != nil {
+		log.Error("PrepareWebhooks [repo_id: %d, renamed from %s]: %v", repo.ID, oldRepoName, err)
+	}
+}
+
 func (m *webhookNotifier) MigrateRepository(ctx context.Context, doer, u *user_model.User, repo *repo_model.Repository) {
 	// Add to hook queue for created repo after session commit.
 	if err := PrepareWebhooks(ctx, EventSource{Repository: repo}, webhook_module.HookEventRepository, &api.RepositoryPayload{
